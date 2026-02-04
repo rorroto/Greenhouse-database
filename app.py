@@ -7,14 +7,21 @@ from datetime import datetime
 # 1. Configuración de la página
 st.set_page_config(page_title="Monitor de Invernaderos", page_icon="🍄", layout="wide")
 
-# Conexión a Base de Datos
+# Conexión a Base de Datos (Se añade columna hora si no existe)
 conn = sqlite3.connect('invernaderos.db', check_same_thread=False)
 c = conn.cursor()
 
 c.execute('CREATE TABLE IF NOT EXISTS invernaderos (id INTEGER PRIMARY KEY, nombre TEXT)')
 c.execute('''CREATE TABLE IF NOT EXISTS registros 
-             (id INTEGER PRIMARY KEY, inv_id INTEGER, fecha TEXT, t_max REAL, t_min REAL, h_max REAL, h_min REAL, co2 REAL)''')
+             (id INTEGER PRIMARY KEY, inv_id INTEGER, fecha TEXT, hora TEXT, t_max REAL, t_min REAL, h_max REAL, h_min REAL, co2 REAL)''')
 conn.commit()
+
+# Verificación de columna hora para bases de datos existentes
+try:
+    c.execute('SELECT hora FROM registros LIMIT 1')
+except sqlite3.OperationalError:
+    c.execute('ALTER TABLE registros ADD COLUMN hora TEXT')
+    conn.commit()
 
 st.title("🍄 Panel de Monitoreo Ambiental")
 st.divider()
@@ -23,10 +30,11 @@ with st.sidebar:
     st.header("Configuración")
     nuevo_inv = st.text_input("Nuevo Invernadero")
     if st.button("Añadir"):
-        c.execute('INSERT INTO invernaderos (nombre) VALUES (?)', (nuevo_inv,))
-        conn.commit()
-        st.success("Invernadero creado")
-        st.rerun()
+        if nuevo_inv:
+            c.execute('INSERT INTO invernaderos (nombre) VALUES (?)', (nuevo_inv,))
+            conn.commit()
+            st.success("Invernadero creado")
+            st.rerun()
 
     inv_df = pd.read_sql('SELECT * FROM invernaderos', conn)
     if not inv_df.empty:
@@ -45,6 +53,14 @@ tab1, tab2, tab3 = st.tabs(["📝 Registro", "📊 Visualización", "📋 Histor
 
 with tab1:
     with st.form("registro_datos"):
+        col_f, col_h = st.columns(2)
+        with col_f:
+            fecha_reg = st.date_input("Fecha", datetime.now())
+        with col_h:
+            # Campo de hora manual, por defecto la actual
+            hora_reg = st.time_input("Hora del registro", datetime.now().time())
+        
+        st.divider()
         col1, col2 = st.columns(2)
         with col1:
             t_max = st.number_input("Temp Máxima (°C)", step=0.1)
@@ -53,12 +69,12 @@ with tab1:
             h_max = st.number_input("Humedad Máx (%)", step=0.1)
             h_min = st.number_input("Humedad Mín (%)", step=0.1)
         co2 = st.number_input("CO2 (ppm)", step=1.0)
-        fecha_reg = st.date_input("Fecha del registro", datetime.now())
+        
         if st.form_submit_button("Guardar Datos"):
-            c.execute('INSERT INTO registros (inv_id, fecha, t_max, t_min, h_max, h_min, co2) VALUES (?,?,?,?,?,?,?)',
-                      (inv_id, str(fecha_reg), t_max, t_min, h_max, h_min, co2))
+            c.execute('INSERT INTO registros (inv_id, fecha, hora, t_max, t_min, h_max, h_min, co2) VALUES (?,?,?,?,?,?,?,?)',
+                      (inv_id, str(fecha_reg), str(hora_reg)[:5], t_max, t_min, h_max, h_min, co2))
             conn.commit()
-            st.success("Datos guardados correctamente")
+            st.success(f"Guardado a las {str(hora_reg)[:5]}")
             st.balloons()
 
 with tab2:
@@ -73,7 +89,7 @@ with tab2:
             mes_num = meses.index(filtro_mes) + 1
             df = df[(df['fecha'].dt.month == mes_num) & (df['fecha'].dt.year == filtro_año)]
         
-        # CORRECCIÓN DEL ERROR: Agrupación segura
+        # Agrupación diaria para el climograma (Promedios)
         df_diario = df.groupby(df['fecha'].dt.date).agg({
             'prom_temp': 'mean',
             'prom_hum': 'mean',
@@ -83,11 +99,10 @@ with tab2:
 
         if not df_diario.empty:
             c1, c2, c3 = st.columns(3)
-            c1.metric("Temp Promedio", f"{df_diario['prom_temp'].mean():.1f} °C")
-            c2.metric("Humedad Promedio", f"{df_diario['prom_hum'].mean():.1f} %")
-            c3.metric("CO2 Promedio", f"{df_diario['co2'].mean():.0f} ppm")
+            c1.metric("Temp Media", f"{df_diario['prom_temp'].mean():.1f} °C")
+            c2.metric("Hum Media", f"{df_diario['prom_hum'].mean():.1f} %")
+            c3.metric("CO2 Medio", f"{df_diario['co2'].mean():.0f} ppm")
 
-            # Climograma mejorado
             fig = go.Figure()
             fig.add_trace(go.Bar(x=df_diario['fecha_dia'], y=df_diario['prom_hum'], name="Humedad %", 
                                  marker_color='rgba(0, 150, 255, 0.3)', yaxis='y2'))
@@ -95,29 +110,28 @@ with tab2:
                                      line=dict(color='red', width=3), mode='lines+markers'))
             
             fig.update_layout(
-                title=f"Climograma: {inv_seleccionado}",
-                yaxis=dict(title="Temperatura (°C)", range=[0, 50]),
+                title=f"Climograma Diario - {inv_seleccionado}",
+                yaxis=dict(title="Temperatura (°C)", range=[0, 45]),
                 yaxis2=dict(title="Humedad (%)", range=[0, 100], overlaying='y', side='right'),
-                hovermode="x unified", legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1)
+                hovermode="x unified", legend=dict(orientation="h", y=1.1)
             )
             st.plotly_chart(fig, use_container_width=True)
-            
-            st.subheader("Concentración de CO2")
             st.bar_chart(df_diario.set_index('fecha_dia')['co2'])
         else:
-            st.warning("No hay datos para el mes/año seleccionado.")
+            st.warning("Sin datos para este periodo.")
     else:
-        st.info("Registra tu primer dato en la pestaña 'Registro' para ver gráficas.")
+        st.info("Ingresa datos para generar gráficos.")
 
 with tab3:
-    st.subheader("Historial de Datos")
-    df_hist = pd.read_sql(f"SELECT id, fecha, t_max, t_min, h_max, h_min, co2 FROM registros WHERE inv_id = {inv_id}", conn)
-    st.dataframe(df_hist.sort_values(by='fecha', ascending=False), use_container_width=True)
+    st.subheader("Historial Completo")
+    df_hist = pd.read_sql(f"SELECT id, fecha, hora, t_max, t_min, h_max, h_min, co2 FROM registros WHERE inv_id = {inv_id}", conn)
+    # Ordenar por fecha y hora más reciente arriba
+    df_hist = df_hist.sort_values(by=['fecha', 'hora'], ascending=False)
+    st.dataframe(df_hist, use_container_width=True, hide_index=True)
     
-    col_del1, col_del2 = st.columns([1, 3])
-    with col_del1:
-        id_borrar = st.number_input("ID a eliminar", step=1, min_value=0)
-        if st.button("Eliminar Registro", type="primary"):
+    with st.expander("Eliminar registros"):
+        id_borrar = st.number_input("ID del registro", step=1, min_value=0)
+        if st.button("Confirmar Eliminación", type="primary"):
             c.execute("DELETE FROM registros WHERE id = ?", (id_borrar,))
             conn.commit()
             st.rerun()
